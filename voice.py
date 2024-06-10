@@ -1,38 +1,101 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from discord.ui import Modal, View, Button, TextInput
 
 intents = discord.Intents.default()
 intents.voice_states = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-bot = commands.Bot(command_prefix='ur prefix', intents=intents)
+CATEGORY_ID = 12345678910  # add the id of the category where the vc rooms will occur here
+TEXT_CHANNEL_ID = 12345678910  # add the id of the text channel here, where there will be a button for users to create their own vc channels
+
+class CustomChannelModal(Modal):
+    def __init__(self):
+        super().__init__(title="Create Custom Channel")
+        self.channel_name = TextInput(label="Channel Name", placeholder="Enter channel name here dude")
+        self.add_item(self.channel_name)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        category = discord.utils.get(interaction.guild.categories, id=CATEGORY_ID)
+        if not category:
+            await interaction.response.send_message("Category not found.", ephemeral=True)
+            return
+        
+        channel_name = self.channel_name.value
+        member = interaction.user
+
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(connect=True),
+            member: discord.PermissionOverwrite(connect=True, mute_members=True)
+        }
+
+        try:
+            channel = await category.create_voice_channel(channel_name, overwrites=overwrites)
+        except Exception as e:
+            await interaction.response.send_message(f"There was an error creating the channel: {e}", ephemeral=True)
+            return
+
+        if member.voice:
+            await member.move_to(channel)
+        await interaction.response.send_message(f"Custom channel '{channel_name}' created successfully!", ephemeral=True)
+
+    @staticmethod
+    async def send_create_channel_button(channel):
+        class CreateChannelView(View):
+            @discord.ui.button(label="Create Room", style=discord.ButtonStyle.primary)
+            async def create_channel_button(self, interaction: discord.Interaction, button: Button):
+                await interaction.response.send_modal(CustomChannelModal())
+
+        view = CreateChannelView()
+        return await channel.send("Click the button below to create a custom voice channel:", view=view)
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Game(name="https://github.com/yqkut"))
+    print(f'Bot is ready. Name: {bot.user}')
+    await bot.change_presence(activity=discord.Game(name="https://yakut.lol"))
+    
+    channel = bot.get_channel(TEXT_CHANNEL_ID)
+    if channel:
+        send_channel_button.start(channel)
+    else:
+        print(f"Text channel with ID {TEXT_CHANNEL_ID} not found.")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    waiting_room_channel_id = 1234567890
-    category_id = 1234567890
-    
-    user_name = member.display_name
-    
-    user_channel_id = after.channel.id if after.channel else None
-    
-    if user_channel_id == waiting_room_channel_id:
+    if after.channel and after.channel.id == TEXT_CHANNEL_ID:
         guild = member.guild
-        category = discord.utils.get(guild.categories, id=category_id)
+        category = discord.utils.get(guild.categories, id=CATEGORY_ID)
+        if not category:
+            print(f"Category with ID {CATEGORY_ID} not found.")
+            return
         
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(connect=True),
             member: discord.PermissionOverwrite(connect=True, mute_members=True)
         }
         
-        channel = await category.create_voice_channel(f"💭・ {user_name}'s Room", overwrites=overwrites)
+        channel = await category.create_voice_channel(f"{member.display_name}'s Room", overwrites=overwrites)
+
         await member.move_to(channel)
         
-    elif before.channel and before.channel.category_id == category_id:
+    if before.channel and before.channel.category_id == CATEGORY_ID:
         if len(before.channel.members) == 0:
-            await before.channel.delete()
+            try:
+                before_channel = await before.channel.guild.fetch_channel(before.channel.id)
+                await before_channel.delete()
+            except discord.NotFound:
+                print(f"Channel {before.channel.name} not found or already deleted.")
+            except discord.Forbidden:
+                print(f"Bot does not have permission to delete channel {before.channel.name}.")
 
-bot.run("ur token")
+@bot.command()
+async def create_channel(ctx):
+    modal = CustomChannelModal()
+    await ctx.send_modal(modal)
+
+@tasks.loop(minutes=2)
+async def send_channel_button(channel):
+    await channel.purge(limit=10)
+    await CustomChannelModal.send_create_channel_button(channel)
+
+bot.run("enter ur token")
